@@ -1,0 +1,194 @@
+{
+  "manifestVersion": 1,
+  "id": "shure-adtq",
+  "name": "Shure ADTQ",
+  "version": "0.1.0",
+  "license": "BUSL-1.1",
+  "repository": "https://github.com/soundbase-lab/shure-adtq",
+  "maintainers": [{ "name": "Matt Dale", "email": "matt.dale@soundbase.app" }],
+  "contract": {
+    "core": "1.2",
+    "modules": {
+      "ChannelMonitoring": "1.0",
+      "PropertyControl": "1.0"
+    }
+  },
+  "runtime": { "type": "node", "entrypoint": "main.js" },
+  "deployment": ["managed"],
+  "template": { "name": "soundbase-plugin-template", "version": "1.0.4" },
+  "products": [
+    {
+      "deviceTypeId": "plugin:shure-adtq/adtq",
+      "manufacturer": { "id": "shure", "name": "Shure" },
+      "model": {
+        "id": "adtq",
+        "name": "ADTQ",
+        "displayName": "Shure ADTQ"
+      },
+      "family": { "id": "axient-digital-psm", "name": "Axient Digital PSM" },
+      "capabilities": {
+        "name": true,
+        "frequency": true,
+        "mute": true,
+        "gain": true,
+        "groupChannel": true,
+        "audioModes": true,
+        "rfEncryption": true
+      },
+      "traits": {
+        "isTransmitter": true,
+        "isIem": true,
+        "isRackDevice": true,
+        "channelCount": 4
+      },
+      "channelName": {
+        "maxLength": 8,
+        "uppercase": false,
+        "allowsSpaces": true,
+        "allowedChars": "^[\\x20-\\x7E]*$"
+      },
+      "layout": {
+        "channel": [
+          {
+            "type": "group",
+            "direction": "row",
+            "children": [
+              {
+                "type": "value",
+                "bind": "frequency",
+                "format": "frequency",
+                "unit": "MHz"
+              },
+              {
+                "type": "value",
+                "bind": "groupChannel.group",
+                "label": "G",
+                "format": "integer"
+              },
+              {
+                "type": "value",
+                "bind": "groupChannel.channel",
+                "label": "CH",
+                "format": "integer"
+              }
+            ]
+          },
+          {
+            "type": "group",
+            "direction": "row",
+            "children": [
+              {
+                "type": "value",
+                "bind": "x.shure-adtq.txPowerMode",
+                "label": "RF power"
+              },
+              {
+                "type": "value",
+                "bind": "gain",
+                "label": "Gain",
+                "unit": "dB",
+                "format": "integer"
+              },
+              {
+                "type": "value",
+                "bind": "audioModes.txMode",
+                "label": "Audio"
+              }
+            ]
+          },
+          {
+            "type": "group",
+            "direction": "row",
+            "children": [
+              {
+                "type": "indicator",
+                "bind": "mute",
+                "label": "RF mute",
+                "tone": "warning"
+              },
+              {
+                "type": "indicator",
+                "bind": "rfState",
+                "label": "RF on",
+                "tone": "success"
+              }
+            ]
+          },
+          { "type": "control", "propertyId": "mute" },
+          { "type": "control", "propertyId": "txPowerMode" },
+          { "type": "control", "propertyId": "audioMode" }
+        ],
+        "device": [
+          { "type": "value", "bind": "deviceName", "label": "Unit" },
+          {
+            "type": "indicator",
+            "bind": "rfEncryption.enabled",
+            "label": "Encryption",
+            "tone": "info"
+          },
+          {
+            "type": "indicator",
+            "bind": "connection.connected",
+            "label": "Link",
+            "tone": "success"
+          }
+        ]
+      }
+    }
+  ],
+  "deviceConfigFields": [
+    {
+      "id": "host",
+      "type": "textinput",
+      "label": "IP address",
+      "required": true,
+      "help": "The ADTQ's address on the control network, as shown on its front panel or in Wireless Workbench. Its control port and identity are discovered from the unit itself."
+    }
+  ],
+  "pluginConfigFields": [
+    {
+      "id": "discoveryNote",
+      "type": "static-text",
+      "label": "Discovery",
+      "help": "ADTQ units on this machine's network segment are found automatically by SLP multicast (UDP 8427), the same way Wireless Workbench finds them. Units on other subnets can be asked directly by listing their addresses below, or added by IP address."
+    },
+    {
+      "id": "addresses",
+      "type": "textinput",
+      "label": "Additional ADTQ addresses",
+      "default": "",
+      "help": "Comma-separated IP addresses to ask directly, for units that multicast does not reach."
+    },
+    {
+      "id": "pollIntervalMs",
+      "type": "number",
+      "label": "Refresh interval",
+      "unit": "ms",
+      "default": 2000,
+      "min": 500,
+      "max": 30000,
+      "step": 100,
+      "help": "How often every channel's settings are re-read from the unit. Changes the unit pushes itself arrive at once regardless."
+    },
+    {
+      "id": "simulate",
+      "type": "checkbox",
+      "label": "Simulate an ADTQ",
+      "default": false,
+      "help": "Adds a simulated four-channel unit that speaks the real protocol on this machine, for trying the workflow with no hardware. It never talks to a real device."
+    }
+  ],
+  "stateKeys": [
+    "deviceName",
+    "connection",
+    "channelName",
+    "frequency",
+    "groupChannel",
+    "mute",
+    "rfState",
+    "gain",
+    "audioModes",
+    "rfEncryption",
+    { "key": "x.shure-adtq.txPowerMode", "scope": "channel", "op": "merge" }
+  ]
+}
