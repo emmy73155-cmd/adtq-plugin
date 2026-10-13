@@ -58,8 +58,17 @@ plugin that fails mysteriously on a clean machine.
 Say so, in your README, in the first section a user reads:
 
 > **Requires libuhd.** `brew install uhd` (macOS) or
-> `apt install libuhd-dev uhd-host` (Linux), then `uhd_images_downloader -t b2xx`
-> once so the FPGA images exist.
+> `apt install libuhd-dev uhd-host` (Linux), then the FPGA images once so a
+> radio can be programmed — `uhd_images_downloader -t b2xx` on Linux, and a
+> script you ship on macOS, because Homebrew installs neither the images nor
+> that command.
+
+Check the instruction on a clean machine of each platform before writing it
+down: Homebrew's `uhd` formula builds from a tarball with no images and keeps
+`uhd_images_downloader` off PATH, so the vendor's one-liner is "command not
+found" on macOS, and the missing images fail silently as "no device found".
+When the honest instruction is a paragraph of shell, ship a script instead and
+make sure your release pack carries it.
 
 Then give an override for when it lives somewhere unusual — an environment
 variable or a plugin config field naming the library path. Users with unusual
@@ -106,40 +115,24 @@ So: lay wheels down as files, and precompile bytecode with a *host-platform*
 interpreter **of the same pinned version**. Nothing target-specific ever runs.
 One job on any OS produces all targets.
 
-### Precompile bytecode, because the install will be read-only
+### Precompile bytecode, because the install may be read-only
 
-Once a plugin ships inside a signed application bundle, its directory is
-read-only. An interpreter that wants to write `.pyc` files beside its own
+Do not count on being able to write inside your own plugin folder once it is
+installed. An interpreter that wants to write `.pyc` files beside its own
 source will fail, or silently pay the compile cost on every single start.
 
 Precompile at assembly time (for Python, `-o 2`) and verify the runtime works
 from a genuinely read-only directory. Test this deliberately — `chmod -R a-w`
 the runtime and start the plugin. It is a five-minute test that catches a bug
-which otherwise only appears after signing, packaging and installing.
+which otherwise only appears on a user's machine.
 
 ### Expect it to be large
 
 A frozen CPython with numpy runs roughly 57 MB on macOS and 77 MB on Windows,
-or about 18–25 MB compressed inside an installer. That is the honest price of
+or about 18–25 MB compressed. That is the honest price of
 "it just works". Budget for it rather than discovering it at release.
 
-## 4. Code signing (macOS)
-
-If your plugin ships inside a signed, notarized application, every Mach-O
-binary in your runtime must be registered for hardened-runtime signing —
-executables, shared libraries, and the dozens of extension modules a scientific
-Python stack drags along.
-
-The one that is not obvious: an interpreter that `ctypes`-loads a
-system-installed library needs the **`disable-library-validation`**
-entitlement. Without it, the hardened runtime refuses to load a library signed
-by anyone else, which is exactly what a Homebrew- or vendor-signed SDK is. The
-failure message does not say this.
-
-Executables also cannot run from inside an asar archive. They have to be
-packaged as an extra resource, unarchived.
-
-## 5. Testing without hardware
+## 4. Testing without hardware
 
 You cannot put a USRP in CI, and you should not need one to develop.
 
@@ -160,7 +153,7 @@ test that drives the real worker in mock mode end to end. Skip the second
 *loudly* when the runtime is absent — a silently skipped test is a test you
 believe is passing.
 
-## 6. Windows
+## 5. Windows
 
 Assembling for Windows is not the same as having tested on Windows. It is
 entirely normal to have a `win32-x64` runtime that assembles cleanly and has
@@ -176,6 +169,9 @@ Two Windows-specific facts worth knowing up front:
 - Path separators reach your device ids and therefore your URLs. Percent-encode
   and round-trip them in a test.
 
-If you have not run it on Windows, say so in your README. A user hitting a
-platform you never tried should discover that from your documentation, not from
-a crash.
+If you have not run it on Windows, leave `win32-x64` out of `platforms` in
+`soundbase-plugin.json`. That is the declaration SoundBase enforces: the Lab
+shows the platforms you list as icons on your listing, and Desktop refuses to
+install or run the plugin on a machine you did not list. A user on a platform
+you never tried should be told by the plugin manager, not by a crash. Add the
+target back when you have executed the runtime there.

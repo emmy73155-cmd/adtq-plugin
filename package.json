@@ -1,6 +1,6 @@
 {
   "name": "soundbase-plugin-shure-adtq",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "SoundBase plugin for the Shure ADTQ four-channel IEM transmitter: RF mute, frequency, transmit power and audio mode over the network, no Wireless Workbench required.",
   "license": "BUSL-1.1",
   "type": "module",
@@ -17,18 +17,17 @@
     "adtq": "node scripts/adtq.mjs",
     "rename": "node scripts/rename.mjs",
     "bump": "node scripts/bump-version.mjs",
-    "release": "node scripts/release.mjs",
     "pack:release": "node scripts/pack-release.mjs"
   },
   "dependencies": {
-    "@soundbase/plugin-contract": "^0.6.0",
-    "@soundbase/plugin-shell": "^0.6.0"
+    "@soundbase/plugin-contract": "^0.12.2",
+    "@soundbase/plugin-shell": "^0.12.2"
   },
   "soundbase": {
     "template": {
       "name": "soundbase-plugin-template",
-      "version": "1.0.4"
+      "version": "1.0.15"
     },
-    "generatedFrom": "09daa42cbba740a51163f4919bd0458a37ad85bc"
+    "generatedFrom": "7f3cd7f23533d5c769f70e8d17eb91dcc4a43a07"
   }
 }

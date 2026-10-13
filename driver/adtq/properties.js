@@ -21,6 +21,10 @@ export const OBJ = Object.freeze({
   CHAN_NAME_ALT: 0x0001, // confirmed mirror of CHAN_NAME
   AUDIO_GAIN_DB: 0x0102, // confirmed: signed byte, value is dB
   AUDIO_MODE: 0x0613, // confirmed: 01 stereo, 00 mono (summed)
+  AF_LEVEL_L: 0x0118, // confirmed: audio level (pair B), left, signed 4-byte dB, post-gain; live
+  AF_LEVEL_R: 0x011a, // confirmed: audio level (pair B), right; equals left in mono
+  AF_DOTS_L: 0x01d5, // confirmed: the panel's 7-dot audio meter, left, as a bitmask (bit n = dot n+1)
+  AF_DOTS_R: 0x01d6, // confirmed: the same, right
   GROUP_CHAN: 0x0802, // confirmed: string "group,channel"
   FREQ_KHZ: 0x0804, // confirmed: 4-byte kHz
   RF_MUTE: 0x080e, // confirmed: 01 muted, 00 unmuted (SET round-tripped)
@@ -32,8 +36,21 @@ export const OBJ = Object.freeze({
   ENCRYPTION: 0x2000, // confirmed: 00 off, 03 on; device-wide (all channels read alike)
 });
 
-/** Probable live RF readings (dBm, signed 4-byte); they drift every read. Not exposed. */
-export const OBJ_RF_LEVELS = Object.freeze([0x0117, 0x0118, 0x0119, 0x011a, 0x01d3, 0x01d4]);
+/**
+ * Live audio level readings, not RF, each as [left, right]: three pairs in dB
+ * (signed 4-byte, measured after the gain stage) and one coarse pair (1 byte).
+ * Confirmed by two stated predictions on a real unit: in mono each pair reads
+ * identically (the summed signal feeds both sides), and with only the right
+ * input fed the first member of every pair fell to the floor while the second
+ * held programme level. What distinguishes pairs a, b and c, and the coarse
+ * pair's scale, are not confirmed. See docs/adtq-properties.md, "Audio levels".
+ */
+export const OBJ_AUDIO_LEVELS = Object.freeze({
+  a: [0x0117, 0x0119], // ~12 dB below pair b on music and on noise: average-like
+  b: [0x0118, 0x011a], // the highest of the three: peak-like
+  c: [0x01d3, 0x01d4], // 1-3 dB under pair b at every gain on every channel
+  dots: [0x01d5, 0x01d6], // the panel's 7-dot meter as a bitmask; see decodeDots
+});
 
 export const TX_POWER_MODES = Object.freeze(['Normal', 'High', 'Low']);
 const TX_POWER_BY_INDEX = Object.freeze({ 0: 'Normal', 1: 'High', 2: 'Low' });
@@ -128,6 +145,38 @@ export const CHANNEL_PROPS = Object.freeze([
 
 export const DEVICE_PROPS = Object.freeze([
   { key: 'encryption', obj: OBJ.ENCRYPTION, channel: 1, decode: (v) => encryptionLabel(decodeInt(v)) },
+]);
+
+/**
+ * The live audio meters, read on their own fast cadence and never part of the
+ * settings refresh. Pair B of the audio levels: the highest of the three dB
+ * pairs, peak-like, with left/right confirmed. The dB reference is not
+ * confirmed (dBFS is the contract's unit and the likely one).
+ */
+const decodeDb = (v) => (v.length === 4 ? v.readInt32BE(0) : null);
+
+export const AF_DOT_COUNT = 7;
+
+/**
+ * The front-panel audio meter byte: bit n lit means dot n+1 lit. The solid
+ * run of low bits is the level bar; a lone higher bit is the peak-hold dot.
+ * 0b0011111 -> 5 dots; 0b0010111 -> a bar of 3 with the peak dot at 5.
+ * Returns `{ bar, peak }` in dots (0..7), `peak` being the highest lit dot.
+ */
+export function decodeDots(v) {
+  if (!v || v.length !== 1) return null;
+  const bits = v[0];
+  let bar = 0;
+  while (bar < 8 && (bits >> bar) & 1) bar += 1;
+  const peak = bits ? 32 - Math.clz32(bits) : 0;
+  return { bar, peak };
+}
+
+export const METER_PROPS = Object.freeze([
+  { key: 'afDb', obj: OBJ.AF_LEVEL_L, decode: decodeDb },
+  { key: 'afRDb', obj: OBJ.AF_LEVEL_R, decode: decodeDb },
+  { key: 'afDots', obj: OBJ.AF_DOTS_L, decode: decodeDots },
+  { key: 'afRDots', obj: OBJ.AF_DOTS_R, decode: decodeDots },
 ]);
 
 const CHANNEL_PROP_BY_OBJ = new Map(CHANNEL_PROPS.map((p) => [p.obj, p]));

@@ -26,14 +26,25 @@ attribute list:
   nothing. Shure derives it from the MAC (`00:0e:dd:2d:45:3e` →
   `DD2D453E-0000-11DD-A000-000EDDCCCCCC`); `cidFromMac` in `slp.js` is the
   last-resort derivation.
-- `acn-fctn` is the model, `acn-uacn` the user-assigned name.
+- `acn-fctn` is the model. `acn-uacn` is ACN's "user-assigned name", but on
+  Shure hardware nobody assigns it: the unit fills it with its model, its
+  band and sometimes a variant tag that Workbench shows nowhere. Heard on one
+  segment (2026-10-07): `ADTQ G57 NACLOCK`, `ADTD K54 NACLOCK`,
+  `ULXD4Q G50 REV5`, `ULXD4D G50 REV2`, `AD4Q A`, `AD4D B`, `P10T G10`,
+  `AD600`. The plugin shows the model and band (`ADTQ G57`) and drops the
+  variant tag; `describeUacn` in `slp.js` is the reading.
 - Three traps: the service type is `esta.dmp`, not `esta.sdt`; the unit
   answers to **UDP/8427 on the requester's address**, not to the source port
   of the request, so the plugin binds 8427 (and an ephemeral socket as a
-  fallback when Workbench owns it); and the unit **answers only the
-  multicast request** — a request unicast to the unit's own address gets
-  nothing back (seen on the real unit, 2026-09-08). Opening a session
-  therefore asks the group and picks the reply out by address.
+  fallback when Workbench owns it); and the unit **only answers a request
+  sent to the multicast group** — the same request unicast to its own
+  address is dropped. Looking up one unit therefore asks the group as well
+  and takes the reply that names it (observed on "ADTQ G57 NACLOCK": six
+  seconds of unicast requests went unanswered; the group request was
+  answered in 100 ms). The Python tool always sent both, which is why it
+  never saw this.
+- With the group joined, adverts from every ACN device on the segment also
+  arrive unasked, every few seconds. A lookup filters them by address.
 
 The `$.ddl` the advert points at would name every property, but the unit runs
 no TFTP server. The property map was enumerated instead.
@@ -144,7 +155,10 @@ ASCII. Integers are big-endian; gain is two's complement (`0xf8` = −8 dB).
 
 ## Silent failure modes, in the order to check them
 
-1. **No SLP reply.** Wrong segment, or UDP/8427 blocked, or the unit is off.
+1. **No SLP reply.** Wrong segment (the lookup is multicast; a routed hop
+   away the unit never hears it), or UDP/8427 blocked, or the unit is off.
+   A request unicast to the unit is ignored — a lookup that only unicasts
+   fails exactly like this.
 2. **SLP reply without a CID.** The session cannot proceed; the driver
    refuses rather than guessing.
 3. **JOIN sent, nothing back.** Wrong CID, or wrong control port. Total
@@ -158,3 +172,8 @@ ASCII. Integers are big-endian; gain is two's complement (`0xf8` = −8 dB).
 6. **Associated, SETs "succeed", nothing changes.** Another controller
    (Workbench) holds the unit; or the SET went out before the write gate.
    The read-back reports NOT APPLIED rather than success.
+7. **SET answered with SET_FAIL.** Not silent, but easy to lose: the reason
+   byte is the PDU's only data (`0x04` = NOT_WRITABLE, seen on the channel
+   name's read address `0x08fb`), and the GET_REPLY to the read-back
+   follows a millisecond later on the same address. The driver keeps both
+   and reports REFUSED with the reason and the value the unit still holds.

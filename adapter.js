@@ -6,7 +6,8 @@
 //   discoverDevices          a standing SLP browse of the segment (plus any
 //                            addresses the plugin config lists)
 //   createMonitoringAdapter  open -> connect, read everything, report it,
-//                            then refresh on a timer and on device EVENTs;
+//                            then refresh on a timer and on device EVENTs,
+//                            with the audio meters on their own faster timer;
 //                            setProperty -> write, read back, report what
 //                            the device now holds
 
@@ -21,18 +22,24 @@ import {
   FREQ_RASTER_KHZ,
   TX_POWER_MODES,
 } from './driver/adtq/properties.js';
-import { SLP_PORT, SlpBrowser } from './driver/acn/slp.js';
+import { SLP_PORT, SlpBrowser, describeUacn } from './driver/acn/slp.js';
 import { FakeAdtq } from './driver/fake/fake-adtq.js';
 import { isIpv4, parseAddressList } from './driver/netutil.js';
 
 export const PRODUCT = 'plugin:shure-adtq/adtq';
 export const TX_POWER_KEY = 'x.shure-adtq.txPowerMode';
+export const AF_DOTS_KEY = 'x.shure-adtq.afDots';
 export const NET_ID_PREFIX = 'net:';
 export const SIM_DEVICE_ID = 'sim:adtq';
 
 const DEFAULT_POLL_MS = 2000;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = 30000;
+// the audio meters: sixteen GETs per tick, no retry, reported as `meters`;
+// a tick costs the unit ~30 ms, so 100 ms leaves room for the settings refresh
+const DEFAULT_METER_MS = 100;
+const MIN_METER_MS = 50;
+const MAX_METER_MS = 1000;
 // how long the SLP browse keeps running after the shell last asked
 const BROWSE_IDLE_MS = 90_000;
 // the fake needs none of Workbench's advert-to-JOIN pause
@@ -130,7 +137,8 @@ const idleCheck = () => {
 
 export const discoveredDevice = (reply) => ({
   id: `${NET_ID_PREFIX}${reply.ip}`,
-  name: reply.uacn ? `${reply.uacn} (${reply.ip})` : `ADTQ (${reply.ip})`,
+  // the model and band the unit advertises; the variant tag after them is not shown
+  name: `${describeUacn(reply.uacn).label ?? 'ADTQ'} (${reply.ip})`,
   product: PRODUCT,
   transport: { kind: 'network', host: reply.ip, port: reply.port },
   config: { host: reply.ip },
@@ -238,11 +246,15 @@ class AdtqMonitoringAdapter {
     this.slpPort = Number.isInteger(device?.config?.slpPort) ? device.config.slpPort : envSlpPort();
     const poll = Number(pluginConfig.pollIntervalMs);
     this.pollIntervalMs = isNum(poll) ? clamp(poll, MIN_POLL_MS, MAX_POLL_MS) : DEFAULT_POLL_MS;
+    const meter = Number(pluginConfig.meterIntervalMs);
+    this.meterIntervalMs = isNum(meter) ? clamp(meter, MIN_METER_MS, MAX_METER_MS) : DEFAULT_METER_MS;
     this.unit = null;
     this.identity = null;
     this.state = { channels: {}, device: {} };
     this.pollTimer = null;
     this.polling = null;
+    this.meterTimer = null;
+    this.metering = null;
     this.closed = false;
     this.lastRefreshAt = 0;
     // assigned by the shell before open()
@@ -276,11 +288,13 @@ class AdtqMonitoringAdapter {
       await unit.close();
       throw new Error('closed while connecting');
     }
-    this.onState?.('deviceName', this.identity.name ?? this.identity.model ?? 'ADTQ');
+    this.onState?.('deviceName', this.identity.label ?? this.identity.model ?? 'ADTQ');
     this.onState?.('connection', { connected: true, since: new Date().toISOString() });
     await this.refresh({ initial: true });
     this.pollTimer = setInterval(() => this.refresh().catch(() => {}), this.pollIntervalMs);
     this.pollTimer.unref?.();
+    this.meterTimer = setInterval(() => this.pollMeters().catch(() => {}), this.meterIntervalMs);
+    this.meterTimer.unref?.();
     return {
       channelCount: CHANNEL_COUNT,
       properties: propertyDescriptors(),
@@ -292,6 +306,8 @@ class AdtqMonitoringAdapter {
     this.closed = true;
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
+    if (this.meterTimer) clearInterval(this.meterTimer);
+    this.meterTimer = null;
     const unit = this.unit;
     this.unit = null;
     if (unit) await unit.close();
@@ -340,6 +356,39 @@ class AdtqMonitoringAdapter {
       this.polling = null;
     });
     return this.polling;
+  }
+
+  /**
+   * One meter tick: the left/right audio level of every channel as the
+   * contract's `meters` reading (`af`, `afR`, in dB), and the panel's 7-dot
+   * meters as the extension key `x.shure-adtq.afDots` (`{ left, right }`, each
+   * `{ bar, peak }` in dots). Channels that did not answer this tick are left
+   * out rather than repeated stale. A tick still in flight when the next is
+   * due is left to finish; the next fires on the timer after it.
+   */
+  async pollMeters() {
+    if (this.metering || this.closed || !this.unit?.connected) return this.metering;
+    this.metering = (async () => {
+      const { channels } = await this.unit.readMeters();
+      if (this.closed) return;
+      const out = {};
+      const dots = {};
+      for (const [n, m] of Object.entries(channels)) {
+        const reading = {};
+        if (m.afDb !== null) reading.af = m.afDb;
+        if (m.afRDb !== null) reading.afR = m.afRDb;
+        if (Object.keys(reading).length) out[n] = reading;
+        const d = {};
+        if (m.afDots) d.left = m.afDots;
+        if (m.afRDots) d.right = m.afRDots;
+        if (Object.keys(d).length) dots[n] = d;
+      }
+      if (Object.keys(out).length) this.onState?.('meters', { timestamp: Date.now(), channels: out });
+      if (Object.keys(dots).length) this.onState?.(AF_DOTS_KEY, { channels: dots });
+    })().finally(() => {
+      this.metering = null;
+    });
+    return this.metering;
   }
 
   mergeChannel(n, props) {
@@ -430,11 +479,14 @@ class AdtqMonitoringAdapter {
       default:
         throw new HttpError(400, 'unknown_property', `No property ${propertyId} on ${PRODUCT}`);
     }
+    if (result.refused) {
+      this.log('warn', `${propertyId} on channel ${channelIndex}: the unit refused ${JSON.stringify(value)} (SET_FAIL ${result.refused})`);
+    }
     if (result.value === null) {
       this.log('warn', `${propertyId} on channel ${channelIndex}: no read-back from the unit; state unconfirmed`);
       return;
     }
-    if (!result.ok) {
+    if (!result.ok && !result.refused) {
       this.log('warn', `${propertyId} on channel ${channelIndex}: the unit did not take ${JSON.stringify(value)}; it reads ${JSON.stringify(result.value)}`);
     }
     // the device is the truth: report what it holds, whether or not that is what was asked

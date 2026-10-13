@@ -80,7 +80,7 @@ or listed under **Additional ADTQ addresses** in the plugin's settings. Tick
 | Gain, dB | `gain` | `0x0102` signed byte, confirmed | **no**, by design |
 | Audio mode | `audioModes.txMode` — `stereo` / `mono` | `0x0613`, confirmed | yes (`audioMode`) |
 | Encryption | `rfEncryption` `{ mode, enabled }`, device-wide | `0x2000`, confirmed | **no**, by design |
-| Unit name | `deviceName` | the SLP `acn-uacn` string | no |
+| Unit name | `deviceName` | the model and band from the SLP `acn-uacn` string (`ADTQ G57`); its variant tag is dropped | no |
 
 RF power is an extension key rather than SoundBase's `txPower` (milliwatts):
 the ADTQ exposes an enum whose indices are identifiers, not a scale (`0` sits
@@ -91,9 +91,31 @@ Normal and Low, so no honest mW figure exists for it.
 is device-wide and forces every receiver to re-sync. Both are shown and
 neither is changed here — change them in Workbench.
 
-**Not exposed.** The live RF level readings (`0x0117`–`0x011a`) drift every
-read and their meaning on a transmitter is unidentified; they are not
-presented as meters. The device's band limits are not readable over DMP, so
+**The card.** SoundBase places the layout's nodes itself, by type and in the
+order the manifest lists them: the two audio meters as one stereo meter, then
+audio mode, RF power and gain as the card's cells, and RF mute as its large
+cell. Group/channel, the RF-on lamp and the panel dots are marked
+`"region": "detail"`, which keeps them for the list view. In mono both meters
+are labelled `M` rather than `L` and `R`, through `labelFrom` on
+`audioModes.txMode`.
+
+`meterStyle`, `region` and `labelFrom` are ChannelMonitoring 1.1 layout
+properties, which is the version the manifest declares and needs SDK 0.12.2
+or later. A SoundBase that predates 1.1 ignores them: the meters stay
+`L`/`R` in mono and the RF-on lamp takes a fourth cell.
+
+**Meters.** The card's left/right audio meters are the unit's post-gain
+audio level at `0x0118`/`0x011a`, read every 100 ms by default (the "Meter
+interval" setting, 50 to 1000 ms) on their own timer and
+reported as the contract's `meters` reading. The sides are confirmed (a mono
+channel reads both alike; feeding the right input only drops the left). The
+figures are dB (a 36 dB gain sweep moved them exactly 36 dB); whether the
+reference is full scale has not been checked with a tone. The unit's own
+7-dot panel meter is read alongside, from `0x01d5`/`0x01d6`, as a bar and a
+peak-hold dot per side, and shown in the list view as "L dots" / "R dots" out
+of 7.
+Two further dB pairs at `0x0117`/`0x0119` and `0x01d3`/`0x01d4` are identified
+but not exposed: what distinguishes them from the first is not confirmed. The device's band limits are not readable over DMP, so
 the frequency property spans UHF (400–1000 MHz); a value outside the unit's
 band is refused by the unit and the card keeps showing what it actually holds.
 
@@ -104,8 +126,8 @@ band is refused by the unit and the card keeps showing what it actually holds.
 | Session key, AES-CTR, SKIP32 tag, every PDU builder and parser, the SLP advert | byte-exact against the Python reference that has muted a real ADTQ (`__tests__/fixtures/acn-vectors.json`) |
 | Session prologue, reads, writes with read-back, EVENTs, loss, silence, disconnect | against the fake, which is built from the same primitives and the captured behaviour |
 | The adapter and the SoundBase contract | through the real `@soundbase/plugin-shell` over HTTP |
-| **This plugin against a real ADTQ** | **not yet run.** The Python tool it was ported from has been run against one; this port has not. `npm run adtq -- status <ip>` is the first thing to do with a unit in reach. |
-| Channel-name writes | never exercised on hardware, not even by the Python tool. The encoding is the one the device uses for reads; the read-back will say whether it took. |
+| **This plugin against a real ADTQ** | **reads and one kind of write.** `discover`, `status` and `name` have run against an ADTQ (2026-09-08/09): SLP lookup with CID, association, a decoded read of every mapped property and the audio meters on all four channels, and channel-name writes confirmed by read-back. RF mute, frequency, power and audio mode have not been written from this port; the Python tool it was ported from has muted the unit. `npm run adtq -- mute <ip> <ch> on` is the next thing to do with a unit in reach. |
+| Channel-name writes | exercised on hardware (2026-09-08): a SET on the read address `0x08fb` is refused with SET_FAIL NOT_WRITABLE; the same SET on `0x0001` takes and both addresses read the new name back. The plugin writes `0x0001`. |
 
 ## Requirements
 
@@ -128,7 +150,7 @@ band is refused by the unit and the card keeps showing what it actually holds.
 | `npm run adtq -- …` | discover, read and control a unit from the terminal |
 | `npm run manifest` | validate `soundbase-plugin.json` against the contract schema |
 | `npm run pack:release` | build the zip users install, and boot-check it |
-| `npm run release <x.y.z>` | tag, pack, and publish a GitHub Release |
+| `npm run bump <x.y.z>` | move the version in every file that carries it; tag and push to release |
 
 Environment knobs, mainly for tests and CI: `SB_ADTQ_SIMULATE=1` (the
 simulated unit), `SB_ADTQ_SLP_PORT` (an SLP port other than 8427),
@@ -151,7 +173,7 @@ driver/
   adtq/device.js        typed reads and writes with read-back, the change feed
   fake/fake-adtq.js     a fake unit on the same wire, for tests and the simulator
 __tests__/              vectors, driver against the fake, adapter through the shell
-scripts/                adtq CLI, smoke, doctor, manifest, rename, bump, release, pack
+scripts/                adtq CLI, smoke, doctor, manifest, rename, bump, pack
 docs/                   the SDK guide set, plus adtq-protocol.md and adtq-properties.md
 ```
 

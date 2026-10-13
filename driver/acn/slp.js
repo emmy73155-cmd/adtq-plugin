@@ -9,6 +9,12 @@
 //     request's source port. To hear them the discovery socket must be bound
 //     to 8427 — and something else (Wireless Workbench) may already own it, so
 //     an ephemeral socket is opened as well and both are listened to.
+//   - The ADTQ answers a request sent to the multicast group and ignores the
+//     same request unicast to its own address. Looking one unit up therefore
+//     still asks the group (and the unit, for fakes on loopback) and picks
+//     the wanted reply out of whatever the segment sends back. Verified on
+//     "ADTQ G57 NACLOCK": three seconds of unicast, nothing; the group
+//     request, answered in 100 ms.
 //
 // A reply carries everything a session needs:
 //
@@ -125,6 +131,32 @@ export function parseSlpReply(pkt) {
   };
 }
 
+// A Shure band code: `A`, `B`, `G57`, `K54`, `G50`, `G10`, `J50A`, `G57+`.
+const BAND = /^[A-Z](\d{1,2}[A-Z+]?)?$/;
+
+/**
+ * What a unit's `acn-uacn` says it is. ACN calls the attribute a user-assigned
+ * name, but nobody assigns it on Shure hardware: the unit fills it with its
+ * model, its band and sometimes a variant tag that Wireless Workbench shows
+ * nowhere. Every unit heard on one segment (2026-10-07):
+ *
+ *   ADTQ G57 NACLOCK   ADTD K54 NACLOCK   ULXD4Q G50 REV5   ULXD4D G50 REV2
+ *   AD4Q A             AD4D B             P10T G10          AD600   AD610
+ *
+ * The band is worth showing and the variant tag is not, so `label` is the
+ * model and band alone. A string with no band in second place is not in this
+ * form and is passed through whole.
+ *
+ * @param {string|null|undefined} uacn
+ * @returns {{ label: string|null, band: string|null }}
+ */
+export function describeUacn(uacn) {
+  const text = typeof uacn === 'string' ? uacn.trim() : '';
+  const [model, second] = text.split(/\s+/);
+  if (model && second && BAND.test(second)) return { label: `${model} ${second}`, band: second };
+  return { label: text || null, band: null };
+}
+
 /** A device's reply: `(cid=…),(acn-fctn=…),…` framed as an SLP SrvRply. */
 export function buildDeviceAdvert({ cid, fctn, uacn, ip, port }) {
   const attrs =
@@ -190,6 +222,9 @@ async function openSlpSockets({ port, localIp, multicast, log }) {
  * @param {number} [options.port=8427] the SLP port the devices listen on
  * @param {number} [options.timeoutMs=1500]
  * @param {string} [options.localIp] interface to send from; derived when absent
+ * @param {boolean} [options.stopWhenTargetsAnswer] resolve as soon as every
+ *   target has answered instead of waiting out the timeout; defaults to true
+ *   for a unicast-only ask and false for a browse, which wants the whole segment
  * @param {(level: string, msg: string) => void} [options.log]
  * @returns {Promise<Array<ReturnType<typeof parseSlpReply> & { from: string }>>}
  */
@@ -199,6 +234,7 @@ export async function slpDiscover({
   port = SLP_PORT,
   timeoutMs = 1500,
   localIp,
+  stopWhenTargetsAnswer = !multicast,
   log,
 } = {}) {
   const ip = localIp ?? localIpToward(targets[0] ?? SLP_GROUP);
@@ -231,8 +267,12 @@ export async function slpDiscover({
         if (!reply) return;
         const key = reply.cidText ?? `${reply.ip}:${reply.port}`;
         if (!found.has(key)) found.set(key, { ...reply, from: rinfo.address });
-        // every address we were asked about has answered: no need to wait out the timer
-        if (targets.length && targets.every((t) => [...found.values()].some((f) => f.from === t || f.ip === t)))
+        // every direct target has answered: no need to wait out the timer
+        if (
+          stopWhenTargetsAnswer &&
+          targets.length &&
+          targets.every((t) => [...found.values()].some((f) => f.from === t || f.ip === t))
+        )
           finish();
       });
       s.on('error', () => {});

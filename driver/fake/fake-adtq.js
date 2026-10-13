@@ -52,6 +52,26 @@ const u32 = (n) => {
   return b;
 };
 
+const i32 = (n) => {
+  const b = Buffer.alloc(4);
+  b.writeInt32BE(n, 0);
+  return b;
+};
+
+/**
+ * The panel's 7-dot meter byte for a level in dB: a solid bar of the dots
+ * whose thresholds the level clears. Thresholds are where each dot went out
+ * as CH1's gain was swept on the unit (pair B read-back), so approximate.
+ */
+const DOT_THRESHOLDS_DB = [-50, -45, -33, -24, -18, -12, -6];
+export function dotsFromDb(db) {
+  let bits = 0;
+  DOT_THRESHOLDS_DB.forEach((t, i) => {
+    if (db >= t) bits |= 1 << i;
+  });
+  return bits;
+}
+
 export const FAKE_CID = Buffer.from(`dd2d453e${SHURE_CID_TAIL}`, 'hex');
 
 /** The property map observed on "ADTQ G57 NACLOCK", as raw values. */
@@ -62,7 +82,15 @@ export function defaultProperties() {
   const power = [1, 0, 0, 0];
   const gain = [16, 0, 0, 0];
   const mode = [1, 0, 1, 1];
+  // audio level pair B as seen on the unit: programme on CH1, idle noise on
+  // CH2/CH4, nothing connected on CH3 (-255)
+  const afL = [-18, -118, -255, -106];
+  const afR = [-21, -118, -255, -105];
   for (let ch = 1; ch <= CHANNEL_COUNT; ch += 1) {
+    set(ch, OBJ.AF_LEVEL_L, i32(afL[ch - 1]));
+    set(ch, OBJ.AF_LEVEL_R, i32(afR[ch - 1]));
+    set(ch, OBJ.AF_DOTS_L, u8(dotsFromDb(afL[ch - 1])));
+    set(ch, OBJ.AF_DOTS_R, u8(dotsFromDb(afR[ch - 1])));
     set(ch, OBJ.CHAN_NAME, encodeString(`Channel${ch}`));
     set(ch, OBJ.CHAN_NAME_ALT, encodeString(`Channel${ch}`));
     set(ch, OBJ.GROUP_CHAN, encodeString(`1,${ch}`));
@@ -102,6 +130,7 @@ export class FakeAdtq extends EventEmitter {
     this.rejectWrites = false; // every SET is ignored
     this.dropInbound = 0; // probability of losing an inbound control datagram
     this.answerSlp = true;
+    this.programme = true; // CH1's meters move like music is playing
     this.counters = { joins: 0, gets: 0, sets: 0, events: 0 };
   }
 
@@ -143,7 +172,24 @@ export class FakeAdtq extends EventEmitter {
   // -- property store ---------------------------------------------------------------------
 
   get(addr) {
-    return this.props.get(addr) ?? null;
+    const raw = this.props.get(addr) ?? null;
+    const split = raw && splitAddr(addr);
+    if (split && split.channel === 1 && this.programme) {
+      // a slow swell and a faster flutter, the right side slightly out of step;
+      // the dots follow the dB with a peak-hold dot one above the bar
+      const right = split.obj === OBJ.AF_LEVEL_R || split.obj === OBJ.AF_DOTS_R;
+      const t = Date.now() / 1000;
+      const phase = right ? 0.9 : 0;
+      const wobble = Math.round(4 * Math.sin(t * 2.1 + phase) + 3 * Math.sin(t * 5.3 + phase));
+      if (split.obj === OBJ.AF_LEVEL_L || split.obj === OBJ.AF_LEVEL_R) return i32(raw.readInt32BE(0) + wobble);
+      if (split.obj === OBJ.AF_DOTS_L || split.obj === OBJ.AF_DOTS_R) {
+        const db = this.props.get(chanAddr(1, right ? OBJ.AF_LEVEL_R : OBJ.AF_LEVEL_L)).readInt32BE(0) + wobble;
+        const bar = dotsFromDb(db);
+        const peakBit = bar ? (bar + 1) << 1 : 0; // a floating peak dot two above the bar
+        return u8((bar | peakBit) & 0x7f);
+      }
+    }
+    return raw;
   }
 
   /** Sets a raw value directly (a front-panel change); emits an EVENT to every session. */
@@ -165,7 +211,11 @@ export class FakeAdtq extends EventEmitter {
     return decodeString(this.get(chanAddr(ch, OBJ.CHAN_NAME)));
   }
 
-  /** What a SET may change, and how the device sanitises it. Unknown = ignored. */
+  /**
+   * What a SET may change, and how the device sanitises it. Returns true when
+   * applied, false when silently ignored, or `{ fail }` with the SET_FAIL
+   * reason the real unit sends back.
+   */
   applySet(addr, value) {
     const split = splitAddr(addr);
     if (!split || this.rejectWrites) return false;
@@ -192,11 +242,14 @@ export class FakeAdtq extends EventEmitter {
         if (value.length !== 1 || value[0] > 1) return false;
         this.props.set(addr, Buffer.from(value));
         return true;
-      case OBJ.CHAN_NAME: {
+      case OBJ.CHAN_NAME:
+        // the real unit: SET_FAIL 0x04 (NOT_WRITABLE); the name is written via 0x0001
+        return { fail: 0x04 };
+      case OBJ.CHAN_NAME_ALT: {
         const s = decodeString(value);
         if (s === null || s.length > 8) return false;
         this.props.set(addr, encodeString(s));
-        this.props.set(chanAddr(split.channel, OBJ.CHAN_NAME_ALT), encodeString(s));
+        this.props.set(chanAddr(split.channel, OBJ.CHAN_NAME), encodeString(s));
         return true;
       }
       default:
@@ -334,7 +387,10 @@ export class FakeAdtq extends EventEmitter {
     } else if (vector === DMP.SET) {
       this.counters.sets += 1;
       this.emit('set', { addr, value });
-      if (this.applySet(addr, value)) {
+      const applied = this.applySet(addr, value);
+      if (applied && applied.fail) {
+        this.sendDmp(s, dmpPdu(DMP.SET_FAIL, addr, u8(applied.fail)));
+      } else if (applied) {
         this.counters.events += 1;
         this.sendDmp(s, dmpPdu(DMP.EVENT, addr, this.get(addr)));
       }

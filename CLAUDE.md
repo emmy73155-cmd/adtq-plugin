@@ -49,7 +49,9 @@ docs/adtq-properties.md the property map and the evidence behind each address
   address, and report `ok` only when the device holds what was written. The
   adapter reports the read-back as state, whether or not it matches the
   request. A SET the device ignores is otherwise invisible; do not add a
-  write path that skips the read-back.
+  write path that skips the read-back. A SET_FAIL is a definite answer: it
+  is surfaced as `refused` with the reason, and the read-back that follows
+  it is still collected.
 - **The device CID is mandatory and comes from SLP.** A JOIN addressed to a
   CID the device does not own is dropped with no reply of any kind. Never
   fall back to a guessed or hardcoded CID; fail with a message that says
@@ -76,6 +78,19 @@ docs/adtq-properties.md the property map and the evidence behind each address
 - **Device ids are stable:** `net:<ip>` for real units, `sim:adtq` for the
   simulator. They are stored in users' projects.
 - **Do not bump the `template` block** in `soundbase-plugin.json`.
+- **The layout lists nodes in card order.** SoundBase places channel nodes by
+  type: meters, then the first four `value`/`indicator` nodes as cells, the
+  `mute` indicator as the large cell. `group` and `direction` do not arrange
+  them. Put what belongs on the card first; mark the rest `"region": "detail"`.
+- **The mono label is keyed by the driver's string.** Both meters carry
+  `labelFrom: { bind: "audioModes.txMode", map: { "mono": "M" } }`; `mono` is
+  the value `AUDIO_MODES` reports, and a test holds the two together.
+- **The declared ChannelMonitoring version is the installed SDK's.** The
+  layout uses 1.1 properties (`meterStyle`, `region`, `labelFrom`), and the
+  shell reports it to SoundBase through the installed contract package: one
+  that implements less drops them silently. Never lower the SDK below 0.12.2,
+  and move `contract.modules.ChannelMonitoring` in the same change as any SDK
+  bump that changes `CM_MODULE_VERSION`. A test holds the two together.
 
 ## The adapter contract
 
@@ -109,10 +124,19 @@ npm run smoke     # boots as a child process, handshakes, drives the simulated u
 npm run adtq -- status <ip>    # the real thing, when a unit is in reach
 ```
 
-This port has **not** been run against a real ADTQ yet; the Python tool it
-was ported from has. The first session with real hardware should start with
-`npm run adtq -- discover`, then `status`, then a single `mute … on`/`off`,
-before anything in SoundBase.
+Against a real ADTQ ("ADTQ G57 NACLOCK", 2026-09-08) this port has run
+`discover` and `status`: SLP found the unit with its CID, the session
+associated, and every mapped property of all four channels read back decoded.
+One kind of write has been made from this port: channel names, which found
+that the name's read address is not writable and `0x0001` is. On 2026-09-09
+the audio level addresses were identified with programme on CH1 (a mono flip
+and a right-only feed, both predicted in advance) and pair B went on the card
+as the L/R meters, polled every 100 ms by default, with the panel's 7-dot meter byte
+(`0x01d5`/`0x01d6`, a bitmask with a peak-hold dot, decoded against the panel
+through a gain sweep) alongside as `x.shure-adtq.afDots`. RF mute has not been written from this
+port; the Python tool it was ported from has muted the unit. The next step
+with hardware is a single `mute … on`/`off` on one channel, before anything
+in SoundBase.
 
 ## Prompts that work
 
@@ -149,6 +173,10 @@ before anything in SoundBase.
 - **A second transport.** The contract is HTTP plus SSE; the device is ACN.
 - **UI.** The layout in the manifest is the card; SoundBase renders it.
 - **Changes to the shell.** Raise an issue instead of a workaround.
-- **Meters from the RF level addresses.** They are unidentified readings that
-  drift; presenting them as meters would be presenting noise as data.
+- **Meters that claim more than is confirmed.** The readings at
+  `0x0117`-`0x011a` and `0x01d3`-`0x01d6` are post-gain audio levels in
+  left/right pairs with the sides confirmed (`docs/adtq-properties.md`,
+  "Audio levels"). What distinguishes the three dB pairs is not, and the dB
+  reference is unverified. A meter labelled with a scale or a meaning nobody
+  has demonstrated is worse than none.
 - **Talking to a unit Workbench is controlling.** One controller at a time.

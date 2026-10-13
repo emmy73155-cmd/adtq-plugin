@@ -24,6 +24,7 @@ import { SLP_PORT, slpDiscover } from '../driver/acn/slp.js';
 import { isIpv4, parseAddressList } from '../driver/netutil.js';
 
 const args = process.argv.slice(2);
+const positional = args.filter((a) => !a.startsWith('--')); // flags never belong in a name
 const cmd = args[0];
 const flag = (name) => {
   const i = args.indexOf(name);
@@ -86,7 +87,8 @@ const channelArg = (s) => {
 };
 
 const report = (what, ch, r, shown = (v) => v) => {
-  if (r.value === null) out(`  ! no read-back from the unit — ${what} on channel ${ch} unconfirmed`);
+  if (r.refused) out(`  ✗ REFUSED — the unit rejected the write (SET_FAIL ${r.refused}); channel ${ch} ${what} ${r.value === null ? 'was not read back' : `still reads ${shown(r.value)}`}`);
+  else if (r.value === null) out(`  ! no read-back from the unit — ${what} on channel ${ch} unconfirmed`);
   else if (r.ok) out(`  ✓ CONFIRMED — channel ${ch} ${what} is now ${shown(r.value)} (device read-back)`);
   else out(`  ✗ NOT APPLIED — channel ${ch} ${what} still reads ${shown(r.value)}`);
 };
@@ -96,15 +98,20 @@ async function status(unit) {
   out(`${unit.identity.model} "${unit.identity.name}" at ${unit.host}:${unit.identity.port}  cid ${unit.identity.cidText}`);
   out(`encryption (device-wide): ${all.device.encryption ?? '—'}`);
   out();
-  out('  CH  NAME      GRP,CH  FREQUENCY     RF POWER  GAIN    AUDIO    RF MUTE');
-  out('  ' + '-'.repeat(72));
+  const meters = await unit.readMeters();
+  out('  CH  NAME      GRP,CH  FREQUENCY     RF POWER  GAIN    AUDIO    RF MUTE   AF L/R dB    DOTS L/R');
+  out('  ' + '-'.repeat(96));
   for (const ch of [1, 2, 3, 4]) {
     const c = all.channels[ch];
+    const m = meters.channels[ch];
+    const af = `${m.afDb ?? '—'} / ${m.afRDb ?? '—'}`;
+    const dot = (d) => (d ? `${'●'.repeat(d.bar)}${'○'.repeat(Math.max(0, 7 - d.bar))}${d.peak > d.bar ? `^${d.peak}` : ''}` : '—');
+    const dots = `${dot(m.afDots)} ${dot(m.afRDots)}`;
     const gc = c.groupChannel ? `${c.groupChannel.group},${c.groupChannel.channel}` : '—';
     const gain = c.gainDb == null ? '—' : `${c.gainDb} dB`;
     out(
       `  ${String(ch).padEnd(4)}${(c.name ?? '—').padEnd(10)}${gc.padEnd(8)}${fmtFreq(c.frequencyMhz).padEnd(14)}` +
-        `${(c.txPowerMode ?? '—').padEnd(10)}${gain.padEnd(8)}${(c.audioMode ?? '—').padEnd(9)}${c.muted == null ? '—' : c.muted ? 'MUTED' : 'unmuted'}`
+        `${(c.txPowerMode ?? '—').padEnd(10)}${gain.padEnd(8)}${(c.audioMode ?? '—').padEnd(9)}${(c.muted == null ? '—' : c.muted ? 'MUTED' : 'unmuted').padEnd(10)}${af.padEnd(13)}${dots}`
     );
   }
   if (all.unanswered) out(`\n  ${all.unanswered} of ${all.asked} reads went unanswered`);
@@ -165,8 +172,8 @@ try {
     }
     case 'name': {
       const ch = channelArg(args[2]);
-      if (!args[3]) usage();
-      await withUnit(args[1], async (unit) => report('name', ch, await unit.setChannelName(ch, args.slice(3).join(' ')), JSON.stringify));
+      if (!positional[3]) usage();
+      await withUnit(args[1], async (unit) => report('name', ch, await unit.setChannelName(ch, positional.slice(3).join(' ')), JSON.stringify));
       break;
     }
     default:

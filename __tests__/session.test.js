@@ -6,7 +6,19 @@ import assert from 'node:assert/strict';
 import { FakeAdtq, FAKE_CID } from '../driver/fake/fake-adtq.js';
 import { AdtqDevice, discoverAdtq } from '../driver/adtq/device.js';
 import { AcnSession } from '../driver/acn/session.js';
-import { OBJ, chanAddr } from '../driver/adtq/properties.js';
+import { OBJ, chanAddr, decodeDots } from '../driver/adtq/properties.js';
+
+test('the panel meter byte decodes as a bar of dots with a peak-hold dot', () => {
+  // values read off the unit while its panel was watched
+  assert.deepEqual(decodeDots(Buffer.from([0b0011111])), { bar: 5, peak: 5 }); // 5 dots, as seen
+  assert.deepEqual(decodeDots(Buffer.from([0b0001111])), { bar: 4, peak: 4 });
+  assert.deepEqual(decodeDots(Buffer.from([0b0000001])), { bar: 1, peak: 1 });
+  assert.deepEqual(decodeDots(Buffer.from([0])), { bar: 0, peak: 0 });
+  assert.deepEqual(decodeDots(Buffer.from([0b0010111])), { bar: 3, peak: 5 }); // 23: bar 3, peak dot 5
+  assert.deepEqual(decodeDots(Buffer.from([0b0101111])), { bar: 4, peak: 6 }); // 47
+  assert.deepEqual(decodeDots(Buffer.from([0b0001011])), { bar: 2, peak: 4 }); // 11
+  assert.equal(decodeDots(Buffer.from([1, 2])), null);
+});
 
 // the prologue's fixed delays, shortened for tests
 const FAST = { advertGapMs: 5, joinDelayMs: 20, writeGateMs: 20, connectTimeoutMs: 3000, requestTimeoutMs: 400 };
@@ -34,7 +46,7 @@ const connect = async (t, fake, extra = {}) => {
 
 test('SLP discovery yields the control port and the CID', async (t) => {
   const fake = await startFake(t);
-  const found = await discoverAdtq('127.0.0.1', { slpPort: fake.slpPort, multicast: false, timeoutMs: 500 });
+  const found = await discoverAdtq('127.0.0.1', { slpPort: fake.slpPort, timeoutMs: 500 });
   assert.equal(found.port, fake.controlPort);
   assert.equal(found.cid.toString('hex'), FAKE_CID.toString('hex'));
   assert.equal(found.cidText, 'DD2D453E-0000-11DD-A000-000EDDCCCCCC');
@@ -42,11 +54,23 @@ test('SLP discovery yields the control port and the CID', async (t) => {
   assert.equal(found.uacn, 'ADTQ G57 NACLOCK');
 });
 
+test('the lookup asks the multicast group too and returns as soon as the unit answers', async (t) => {
+  // The real ADTQ only answers a request sent to 239.255.254.253; the fake on
+  // loopback only hears the unicast one. Both go out; the first matching reply
+  // ends the wait, well inside the timeout.
+  const fake = await startFake(t);
+  const t0 = Date.now();
+  const found = await discoverAdtq('127.0.0.1', { slpPort: fake.slpPort, multicast: true, timeoutMs: 2000 });
+  assert.equal(found.port, fake.controlPort);
+  assert.equal(found.cidText, 'DD2D453E-0000-11DD-A000-000EDDCCCCCC');
+  assert.ok(Date.now() - t0 < 1500, 'resolved on the reply, not on the timeout');
+});
+
 test('a device that does not answer SLP is a clear error, not a hang', async (t) => {
   const fake = await startFake(t);
   fake.answerSlp = false;
   await assert.rejects(
-    () => discoverAdtq('127.0.0.1', { slpPort: fake.slpPort, multicast: false, timeoutMs: 100, attempts: 1 }),
+    () => discoverAdtq('127.0.0.1', { slpPort: fake.slpPort, timeoutMs: 100, attempts: 1 }),
     /No ACN device answered at 127\.0\.0\.1/
   );
 });
@@ -75,6 +99,8 @@ test('the session associates and every mapped property reads back decoded', asyn
   const device = await connect(t, fake);
   assert.equal(device.identity.model, 'ADTQ');
   assert.equal(device.identity.name, 'ADTQ G57 NACLOCK');
+  assert.equal(device.identity.label, 'ADTQ G57');
+  assert.equal(device.identity.band, 'G57');
   assert.equal(device.session.protoOk, true);
   assert.equal(device.session.recipAssocSent, true);
 
@@ -94,6 +120,26 @@ test('the session associates and every mapped property reads back decoded', asyn
   assert.equal(all.channels[3].frequencyMhz, 471.725);
   assert.equal(all.channels[4].txPowerMode, 'Normal');
   assert.deepEqual(all.device, { encryption: 'Off' });
+});
+
+test('the audio meters read as left/right dB per channel, apart from the settings read', async (t) => {
+  const fake = await startFake(t);
+  const device = await connect(t, fake);
+  const m = await device.readMeters();
+  assert.equal(m.unanswered, 0);
+  for (const ch of [1, 2, 3, 4]) {
+    assert.equal(typeof m.channels[ch].afDb, 'number', `ch${ch} left`);
+    assert.equal(typeof m.channels[ch].afRDb, 'number', `ch${ch} right`);
+  }
+  assert.ok(m.channels[1].afDb > -40 && m.channels[1].afDb < 0, 'programme on CH1');
+  assert.equal(m.channels[3].afDb, -255, 'nothing connected reads -255');
+  // the panel's 7-dot meter: a bar that follows the level, a peak dot above it
+  assert.equal(m.asked, 16);
+  assert.ok(m.channels[1].afDots.bar >= 3 && m.channels[1].afDots.bar <= 7, 'CH1 bar lit');
+  assert.ok(m.channels[1].afDots.peak >= m.channels[1].afDots.bar, 'peak at or above the bar');
+  assert.deepEqual(m.channels[3].afDots, { bar: 0, peak: 0 });
+  assert.deepEqual(m.channels[3].afRDots, { bar: 0, peak: 0 });
+  assert.equal('afDb' in (await device.readChannel(1)), false, 'meters are not part of the settings read');
 });
 
 test('writes are confirmed by read-back, and a refused write is reported as not applied', async (t) => {
@@ -117,6 +163,15 @@ test('writes are confirmed by read-back, and a refused write is reported as not 
   assert.deepEqual(await device.setTxPowerMode(1, 'low'), { ok: true, value: 'Low' });
   assert.deepEqual(await device.setAudioMode(2, 'Stereo'), { ok: true, value: 'stereo' });
   assert.deepEqual(await device.setChannelName(4, 'Lead Vox'), { ok: true, value: 'Lead Vox' });
+  assert.equal(fake.channelName(4), 'Lead Vox');
+
+  // the read address of the name is not writable: the unit answers SET_FAIL
+  // NOT_WRITABLE and then still answers the read-back GET, and both are kept
+  const refused = await device.session.set(chanAddr(4, OBJ.CHAN_NAME), Buffer.from('0006abcd', 'hex'));
+  assert.equal(refused.ok, false);
+  assert.equal(refused.refused, 4);
+  assert.equal(refused.reply.vector, 3, 'the GET_REPLY behind the SET_FAIL is the read-back');
+  assert.ok(refused.after, 'a refusal still comes with the read-back');
   assert.equal(fake.channelName(4), 'Lead Vox');
 
   fake.rejectWrites = true;

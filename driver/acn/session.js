@@ -57,6 +57,7 @@ import { SLP_GROUP, SLP_PORT, SHURE_CID_TAIL, buildAdvert } from './slp.js';
 import { delay, localIpToward } from '../netutil.js';
 
 export const TERMINAL_DMP_VECTORS = new Set([DMP.GET_REPLY, DMP.GET_FAIL, DMP.SET_FAIL]);
+const GET_ANSWERS = new Set([DMP.GET_REPLY, DMP.GET_FAIL]);
 
 /** A fresh controller CID in Shure's MAC-derived shape. */
 export const generateCid = () => Buffer.concat([randomBytes(4), Buffer.from(SHURE_CID_TAIL, 'hex')]);
@@ -141,7 +142,7 @@ export class AcnSession extends EventEmitter {
     this.lastKeepalive = 0;
     this.keepaliveTimer = null;
 
-    this.waiters = new Map(); // addr -> Set<resolver>
+    this.waiters = new Map(); // addr -> Set<{ accepts: Set<vector>, resolve }>
     this.stats = { sent: 0, received: 0, decoded: 0, undecodable: 0, naks: 0 };
   }
 
@@ -254,7 +255,7 @@ export class AcnSession extends EventEmitter {
     this.ready = false;
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
     this.keepaliveTimer = null;
-    for (const waiters of this.waiters.values()) for (const w of waiters) w(null);
+    for (const waiters of this.waiters.values()) for (const w of waiters) w.resolve(null);
     this.waiters.clear();
     if (this.sock && this.joined && this.devChan) {
       try {
@@ -468,8 +469,12 @@ export class AcnSession extends EventEmitter {
       if (!TERMINAL_DMP_VECTORS.has(prop.vector)) continue;
       const waiters = this.waiters.get(prop.addr);
       if (!waiters) continue;
-      this.waiters.delete(prop.addr);
-      for (const resolve of waiters) resolve(prop);
+      for (const w of [...waiters]) {
+        if (!w.accepts.has(prop.vector)) continue;
+        waiters.delete(w);
+        w.resolve(prop);
+      }
+      if (!waiters.size) this.waiters.delete(prop.addr);
     }
   }
 
@@ -478,29 +483,31 @@ export class AcnSession extends EventEmitter {
   /**
    * Sends `pdu` and resolves with the terminal reply for `addr` —
    * `{ vector, addr, value }` — or null on timeout. Only GET_REPLY, GET_FAIL
-   * and SET_FAIL settle a request: the device also emits SET echoes and
-   * unsolicited EVENTs on the same address, and treating those as the answer
-   * would hand back a stale or racing value.
+   * and SET_FAIL settle a request (`accepts` narrows that further): the
+   * device also emits SET echoes and unsolicited EVENTs on the same address,
+   * and treating those as the answer would hand back a stale or racing value.
    */
-  request(pdu, addr, timeoutMs = this.requestTimeoutMs) {
+  request(pdu, addr, timeoutMs = this.requestTimeoutMs, accepts = TERMINAL_DMP_VECTORS) {
     if (!this.ready) return Promise.resolve(null);
     return new Promise((resolve) => {
       let settled = false;
+      const waiter = { accepts, resolve: null };
       const done = (reply) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         const set = this.waiters.get(addr);
         if (set) {
-          set.delete(done);
+          set.delete(waiter);
           if (!set.size) this.waiters.delete(addr);
         }
         resolve(reply);
       };
+      waiter.resolve = done;
       const timer = setTimeout(() => done(null), timeoutMs);
       timer.unref?.();
       if (!this.waiters.has(addr)) this.waiters.set(addr, new Set());
-      this.waiters.get(addr).add(done);
+      this.waiters.get(addr).add(waiter);
       try {
         this.sendDmp(pdu);
       } catch (err) {
@@ -512,7 +519,7 @@ export class AcnSession extends EventEmitter {
 
   /** GET one address: `{ vector, addr, value }`, or null when nothing came back. */
   get(addr, timeoutMs) {
-    return this.request(dmpPdu(DMP.GET, addr), addr, timeoutMs);
+    return this.request(dmpPdu(DMP.GET, addr), addr, timeoutMs, GET_ANSWERS);
   }
 
   /**
@@ -540,16 +547,31 @@ export class AcnSession extends EventEmitter {
   }
 
   /**
-   * SET `addr` to `value`, then read it back. Returns `{ ok, after }` where
-   * `after` is the device's own account of the property and `ok` says it
-   * equals what was written. The read-back is the point: a SET the device
+   * SET `addr` to `value`, then read it back. Returns `{ ok, after, refused }`
+   * where `after` is the device's own account of the property and `ok` says
+   * it equals what was written. The read-back is the point: a SET the device
    * silently ignores is otherwise indistinguishable from one that worked.
+   *
+   * A SET has no positive acknowledgement in DMP, only a SET_FAIL when the
+   * device rejects it; `refused` is that reason byte (`DMP_FAIL_REASON` names
+   * it) or null. The GET goes out right behind the SET, so a SET_FAIL must
+   * not be taken as the GET's answer: the real unit sends the SET_FAIL and
+   * then the GET_REPLY a millisecond later, and both are wanted.
    */
   async set(addr, value, timeoutMs) {
-    if (!this.ready) return { ok: false, after: null };
-    this.sendDmp(dmpPdu(DMP.SET, addr, value));
-    const reply = await this.get(addr, timeoutMs);
-    const after = reply && reply.vector === DMP.GET_REPLY ? reply.value : null;
-    return { ok: after !== null && after.equals(Buffer.from(value)), after, reply };
+    if (!this.ready) return { ok: false, after: null, refused: null };
+    let refused = null;
+    const onDmp = (prop) => {
+      if (prop.vector === DMP.SET_FAIL && prop.addr === addr && refused === null) refused = prop.value[0] ?? 1;
+    };
+    this.on('dmp', onDmp);
+    try {
+      this.sendDmp(dmpPdu(DMP.SET, addr, value));
+      const reply = await this.get(addr, timeoutMs);
+      const after = reply && reply.vector === DMP.GET_REPLY ? reply.value : null;
+      return { ok: refused === null && after !== null && after.equals(Buffer.from(value)), after, reply, refused };
+    } finally {
+      this.off('dmp', onDmp);
+    }
   }
 }

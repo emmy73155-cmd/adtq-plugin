@@ -9,6 +9,7 @@ import {
   cidFromMac,
   cidFromString,
   cidToString,
+  describeUacn,
   parseSlpReply,
 } from '../driver/acn/slp.js';
 import { localIpToward, parseAddressList, sameSubnet } from '../driver/netutil.js';
@@ -47,6 +48,22 @@ test('a device reply yields port, CID, function and name — parentheses in the 
   assert.equal(p.uacn, 'ADTQ (stage left)');
   assert.equal(p.port, 57384);
   assert.equal(parseSlpReply(Buffer.from('nothing here')), null);
+});
+
+test("a unit's advertised name is read as its model and band, without the variant tag", () => {
+  // every Shure unit heard on one segment, 2026-10-07
+  const heard = {
+    'ADTQ G57 NACLOCK': { label: 'ADTQ G57', band: 'G57' },
+    'ADTD K54 NACLOCK': { label: 'ADTD K54', band: 'K54' },
+    'ULXD4Q G50 REV5': { label: 'ULXD4Q G50', band: 'G50' },
+    'AD4Q A': { label: 'AD4Q A', band: 'A' },
+    'P10T G10': { label: 'P10T G10', band: 'G10' },
+    AD600: { label: 'AD600', band: null },
+  };
+  for (const [uacn, expected] of Object.entries(heard)) assert.deepEqual(describeUacn(uacn), expected, uacn);
+  // anything not in that form is passed through whole
+  assert.deepEqual(describeUacn('ADTQ (simulated)'), { label: 'ADTQ (simulated)', band: null });
+  assert.deepEqual(describeUacn(null), { label: null, band: null });
 });
 
 test('CID spellings and the MAC derivation', () => {

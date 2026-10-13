@@ -2,20 +2,21 @@
   "manifestVersion": 1,
   "id": "shure-adtq",
   "name": "Shure ADTQ",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "license": "BUSL-1.1",
   "repository": "https://github.com/soundbase-lab/shure-adtq",
   "maintainers": [{ "name": "Matt Dale", "email": "matt.dale@soundbase.app" }],
+  "platforms": ["darwin-arm64", "darwin-x64", "win32-x64"],
   "contract": {
-    "core": "1.2",
+    "core": "1.4",
     "modules": {
-      "ChannelMonitoring": "1.0",
+      "ChannelMonitoring": "1.1",
       "PropertyControl": "1.0"
     }
   },
   "runtime": { "type": "node", "entrypoint": "main.js" },
   "deployment": ["managed"],
-  "template": { "name": "soundbase-plugin-template", "version": "1.0.4" },
+  "template": { "name": "soundbase-plugin-template", "version": "1.0.15" },
   "products": [
     {
       "deviceTypeId": "plugin:shure-adtq/adtq",
@@ -27,6 +28,7 @@
       },
       "family": { "id": "axient-digital-psm", "name": "Axient Digital PSM" },
       "capabilities": {
+        "meters": true,
         "name": true,
         "frequency": true,
         "mute": true,
@@ -48,72 +50,32 @@
         "allowedChars": "^[\\x20-\\x7E]*$"
       },
       "layout": {
+        "meterStyle": "led",
         "channel": [
           {
-            "type": "group",
-            "direction": "row",
-            "children": [
-              {
-                "type": "value",
-                "bind": "frequency",
-                "format": "frequency",
-                "unit": "MHz"
-              },
-              {
-                "type": "value",
-                "bind": "groupChannel.group",
-                "label": "G",
-                "format": "integer"
-              },
-              {
-                "type": "value",
-                "bind": "groupChannel.channel",
-                "label": "CH",
-                "format": "integer"
-              }
-            ]
+            "type": "meter",
+            "bind": "meters.af",
+            "metric": "AUDIO_LEVEL",
+            "label": "L",
+            "labelFrom": { "bind": "audioModes.txMode", "map": { "mono": "M" } }
           },
           {
-            "type": "group",
-            "direction": "row",
-            "children": [
-              {
-                "type": "value",
-                "bind": "x.shure-adtq.txPowerMode",
-                "label": "RF power"
-              },
-              {
-                "type": "value",
-                "bind": "gain",
-                "label": "Gain",
-                "unit": "dB",
-                "format": "integer"
-              },
-              {
-                "type": "value",
-                "bind": "audioModes.txMode",
-                "label": "Audio"
-              }
-            ]
+            "type": "meter",
+            "bind": "meters.afR",
+            "metric": "AUDIO_LEVEL_RIGHT",
+            "label": "R",
+            "labelFrom": { "bind": "audioModes.txMode", "map": { "mono": "M" } }
           },
-          {
-            "type": "group",
-            "direction": "row",
-            "children": [
-              {
-                "type": "indicator",
-                "bind": "mute",
-                "label": "RF mute",
-                "tone": "warning"
-              },
-              {
-                "type": "indicator",
-                "bind": "rfState",
-                "label": "RF on",
-                "tone": "success"
-              }
-            ]
-          },
+          { "type": "value", "bind": "audioModes.txMode", "label": "Audio" },
+          { "type": "value", "bind": "x.shure-adtq.txPowerMode", "label": "RF power" },
+          { "type": "value", "bind": "gain", "label": "Gain", "unit": "dB", "format": "integer" },
+          { "type": "indicator", "bind": "mute", "label": "RF mute", "tone": "warning" },
+          { "type": "indicator", "bind": "rfState", "label": "RF on", "tone": "success", "region": "detail" },
+          { "type": "value", "bind": "frequency", "format": "frequency", "unit": "MHz" },
+          { "type": "value", "bind": "groupChannel.group", "label": "G", "format": "integer", "region": "detail" },
+          { "type": "value", "bind": "groupChannel.channel", "label": "CH", "format": "integer", "region": "detail" },
+          { "type": "value", "bind": "x.shure-adtq.afDots.left.bar", "format": "integer", "label": "L dots", "unit": "/7", "region": "detail" },
+          { "type": "value", "bind": "x.shure-adtq.afDots.right.bar", "format": "integer", "label": "R dots", "unit": "/7", "region": "detail" },
           { "type": "control", "propertyId": "mute" },
           { "type": "control", "propertyId": "txPowerMode" },
           { "type": "control", "propertyId": "audioMode" }
@@ -142,6 +104,7 @@
       "type": "textinput",
       "label": "IP address",
       "required": true,
+      "manualOnly": true,
       "help": "The ADTQ's address on the control network, as shown on its front panel or in Wireless Workbench. Its control port and identity are discovered from the unit itself."
     }
   ],
@@ -171,6 +134,17 @@
       "help": "How often every channel's settings are re-read from the unit. Changes the unit pushes itself arrive at once regardless."
     },
     {
+      "id": "meterIntervalMs",
+      "type": "number",
+      "label": "Meter interval",
+      "unit": "ms",
+      "default": 100,
+      "min": 50,
+      "max": 1000,
+      "step": 10,
+      "help": "How often the audio meters are read. Each read costs the unit about 30 ms of replies; 100 ms is a smooth meter with headroom."
+    },
+    {
       "id": "simulate",
       "type": "checkbox",
       "label": "Simulate an ADTQ",
@@ -189,6 +163,8 @@
     "gain",
     "audioModes",
     "rfEncryption",
-    { "key": "x.shure-adtq.txPowerMode", "scope": "channel", "op": "merge" }
+    "meters",
+    { "key": "x.shure-adtq.txPowerMode", "scope": "channel", "op": "merge" },
+    { "key": "x.shure-adtq.afDots", "scope": "channel", "op": "merge" }
   ]
 }

@@ -48,6 +48,21 @@ export const JOIN_REFUSE_REASON = {
   8: 'LOST_SEQUENCE',
 };
 
+// DMP SET_FAIL / GET_FAIL reason byte (ANSI E1.17 DMP, table of failure codes)
+export const DMP_FAIL_REASON = {
+  1: 'NONSPECIFIC',
+  2: 'NOT_A_PROPERTY',
+  3: 'WRITE_ONLY',
+  4: 'NOT_WRITABLE',
+  5: 'DATA_ERROR',
+  6: 'MAPS_NOT_SUPPORTED',
+  7: 'SPACE_NOT_AVAILABLE',
+  8: 'PROP_NOT_MAPPED',
+  9: 'MAP_NOT_ALLOCATED',
+  10: 'SUBSCRIPTION_NOT_SUPPORTED',
+  11: 'NO_SUBSCRIPTIONS_SUPPORTED',
+};
+
 // DMP vectors (ANSI E1.17 standard codes)
 export const DMP = {
   GET: 1,

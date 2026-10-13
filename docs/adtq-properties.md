@@ -35,13 +35,17 @@ Verified by evidence, not inference.
 | `0x080e` | 1 | **RF mute** (`01` = muted, `00` = unmuted) | Round-tripped SET/GET in both directions on all 4 channels |
 | `0x0804` | 4 | **Frequency, kHz** | Four distinct in-band values (470.625 / 471.225 / 471.725 / 472.300 MHz), all on Shure's 25 kHz raster, for a G57 unit |
 | `0x0802` | str | **Group,channel** | `"1,1"` `"1,2"` `"1,3"` `"1,4"` — tracks channel index |
-| `0x08fb` | str | **Channel name** | `"Channel1"` … `"Channel4"` |
-| `0x0001` | str | Channel name (mirror of `0x08fb`) | Same value, both channels checked |
+| `0x08fb` | str | **Channel name** (read; not writable) | `"Channel1"` … `"Channel4"`. A SET here is answered with SET_FAIL `0x04` NOT_WRITABLE (CH1, 2026-09-08). |
+| `0x0001` | str | **Channel name, writable** | Same value as `0x08fb`, both channels checked. Writing `"EDITED"` here on CH1 read back on `0x0001` within 6 ms and on `0x08fb` within 1.5 s, so this is the address the plugin writes and `0x08fb` mirrors it. |
 | `0x0102` | 1 | **Digital audio gain, dB** — signed, raw value = dB | 16 dB -> 9 dB moved it `0x10` -> `0x09`; a full 117-property diff of that change touched only this and the encryption byte, 0 unread. Negative confirmed separately: CH2 set to -8 dB reads `0xf8`. |
 | `0x0613` | 1 | **Audio mode** — `01` = Stereo, `00` = Mono (summed). Per channel. | Found by cross-channel comparison (CH2 mono was the only unexplained difference against CH3 == CH4, from 468 addresses, 0 unread), then confirmed by a prediction stated in advance: flipping CH3 to mono would move `0x02020613` `01` -> `00`. It did, while CH2 and CH4 held. |
 | `0x2000` | 1 | **Encryption** (`00` = off, `03` = on). Device-wide: WWB warns the setting applies to all channels, and all four channels read identically. | Three independent readings: `00` before it was ever touched, `03` with encryption on, `00` again after turning it off. A full 117-property diff of the on->off transition moved this address and **nothing else**, with 0 addresses unread. |
 | `0x0811` | 1 | **Transmit power** (enum index) | `00` = Normal, `01` = High, `02` = Low. Tracked the WWB setting across four transitions. A full-map diff of Low -> Normal moved this address and **nothing else** (1 change in 111 properties). |
 | `0x0814`, `0x0884`, `0x0885` | 2 | **Power level, High vs not** | All three read 20 on High and 10 on both Normal and Low. They distinguish High from the other two but do NOT separate Normal from Low, so they cannot encode the setting on their own — `0x0811` does that. |
+| `0x0117` L, `0x0119` R | 4 | **Audio level, pair A**, dB, signed, post-gain | Live; moves only on the channel carrying audio. Mono made L and R identical in 41/41 samples and stereo split them again; right-only input dropped L to -85 while R held -18. ~12-14 dB under pair B on music and on idle noise alike, so average-like — that last part is a hypothesis. See "Audio levels". |
+| `0x0118` L, `0x011a` R | 4 | **Audio level, pair B**, dB, signed, post-gain | Same two predictions held (right-only: L -78, R -13). The highest of the three pairs, so peak-like — hypothesis. A gain change moves it; -255 on a channel with nothing connected. **Exposed** as the card's meters (`meters.af` / `meters.afR`), polled every 100 ms by default. |
+| `0x01d3` L, `0x01d4` R | 4 | **Audio level, pair C**, dB, signed, post-gain | Same two predictions held (right-only: L -78, R -13). Sits 1-3 dB under pair B at every gain on every channel; what separates it from B is unknown. |
+| `0x01d5` L, `0x01d6` R | 1 | **Front-panel audio meter, 7 dots, as a bitmask** — bit n lit = dot n+1 lit; the solid low run is the bar, a lone higher bit the peak-hold dot | Sides confirmed like the dB pairs (right-only: L 0, R 31). The operator read 5 dots on the panel while the byte read 31 = `0011111`; a gain sweep then walked it 31 → 15 → 7 → 3 → 1 (5, 4, 3, 2, 1 dots) as pair B fell -13 → -49 dB. 23, 39, 47 and 11 are a bar plus one higher bit: the peak-hold dot. **Exposed** as `x.shure-adtq.afDots`. |
 
 ## Probable
 
@@ -50,8 +54,6 @@ Consistent with the evidence but NOT confirmed. Verify with
 
 | Object | Bytes | Hypothesis | Why, and what's unproven |
 |---|---|---|---|
-| `0x0117`-`0x011a` | 4 | RF level, dBm | Read -102/-87/-99/-88, and **drift between sweeps** while settings stay fixed — live measurement, not config. Which antenna/path each maps to is unknown. |
-| `0x01d3`,`0x01d4` | 4 | RF level, dBm | -90/-89, same shape as above |
 | `0x0805` | 1 | Unknown | Reads `02` on all 4 channels. Was the leading TX-power candidate on shape alone; a live power change **disproved it** — it did not move. Left unidentified. |
 | `0x081f` | 1 | RF status | Reads `01` while `0x080e` reads `00`, so it is NOT a mute mirror |
 | `0x0f10`-`0x0f17` | 16 | Linked-device CIDs | Slot 0 = `ff2db752-0000-11dd-a000-000eddcccccc`, Shure CID format; slots 1-7 zero. That CID advertises nowhere on the LAN. |
@@ -120,8 +122,8 @@ python3 adtq_explore.py watch --objects objects.txt
 ```
 
 Two practical notes. Change the setting on **one channel** if you can — the per-channel
-address falls straight out of it. And `watch` suppresses the RF level readings by default
-(`--ignore`), because they drift a few dB every poll and otherwise bury the single
+address falls straight out of it. And `watch` suppresses the audio level readings by default
+(`--ignore`), because they move a few dB every poll and otherwise bury the single
 discrete change you are looking for in a wall of noise.
 
 ### Audio mode (`0x0613`)
@@ -136,6 +138,74 @@ Per channel, unlike encryption. Confirmed on two channels independently.
 `0x0612` sits adjacent and is **not** part of this: it reads `00` on CH1 and `01` on
 CH2/3/4 regardless of mode (CH4 is stereo and reads `01`, CH1 is stereo and reads `00`).
 It tracks something CH1-specific and remains unidentified.
+
+### Audio levels (`0x0117`-`0x011a`, `0x01d3`-`0x01d6`)
+
+Earlier sweeps graded `0x0117`-`0x011a` and `0x01d3`/`0x01d4` as "RF level, dBm"
+because they drifted. On 2026-09-09, with programme audio fed to CH1 only, a full
+117-property sweep sampled six times found exactly eight addresses moving, all on CH1:
+those six plus `0x01d5`/`0x01d6`. CH2-4, with no audio, held steady at noise-floor
+values (CH3, with nothing connected, read -255 everywhere and 0 on the coarse pair).
+
+A prediction stated before the second data point: if these are left/right audio meters,
+switching CH1 to mono (summed) makes each pair read the same value, and switching back
+separates them. Sampled at ~7 Hz through stereo → mono → stereo:
+
+| Phase | `0x0117` / `0x0119` | `0x0118` / `0x011a` | `0x01d3` / `0x01d4` | `0x01d5` / `0x01d6` |
+|---|---|---|---|---|
+| stereo | -24 / -26, -25 / -28, -26 / -30 … | -13 / -14, -11 / -12 … | -14 / -17, -15 / -19 … | 47 / 23, 39 / 23, 31 / 23 … |
+| mono | identical in all 41 samples | identical in all 41 samples | identical in all 41 samples | identical in all 41 samples |
+| stereo again | -27 / -24, -25 / -23 … | -13 / -14, -14 / -15 … | -14 / -15 … | 23 / 31 … |
+
+So each pair is one measurement taken on both sides of the channel. The source was a
+near-centre stereo programme, which is why the sides differ by only a few dB in stereo.
+Both modes are therefore described by the same addresses: in mono the two sides agree.
+
+All three dB pairs sit **after the gain stage**: taking CH1's gain from +9 to -8 dB moved
+every pair down together (pair A -24 → -49, B -12 → -35, C -14 → -38 at the median) while
+their spacing held, and the coarse pair fell from 23..47 to a steady 3. The drop exceeded
+the 17 dB gain change, so the programme level moved as well; the gain alone cannot be
+read off these numbers, but no pair is a pre-gain input reading.
+
+**Sides.** Prediction stated before the reading: with only the right side fed, one member
+of each pair stays at programme level and the other falls to the noise floor, and the one
+that stays is right. With CH1 at 16 dB gain and the right input only, 40 samples:
+
+| Pair | first address | second address |
+|---|---|---|
+| A | `0x0117`: -85 | `0x0119`: -17..-18 |
+| B | `0x0118`: -77..-79 | `0x011a`: -13 |
+| C | `0x01d3`: -77..-80 | `0x01d4`: -13 |
+| coarse | `0x01d5`: 0 | `0x01d6`: 31 |
+
+So in every pair the lower address is **left** and the higher is **right**.
+
+**The dot meter.** The operator watched the panel: 5 dots lit while `0x01d6` read 31,
+which is `0011111`. A gain sweep from +16 to -20 dB with the right input fed then gave:
+
+| Gain | pair B right (dB) | `0x01d6` | binary | dots |
+|---|---|---|---|---|
+| 16..11 | -13..-17 | 31 | `0011111` | 5 |
+| 10..4 | -19..-22 | 15 | `0001111` | 4 |
+| 3 | -22 | 11 | `0001011` | bar 2, peak dot 4 |
+| 2..-6 | -27..-30 | 7 | `0000111` | 3 |
+| -7..-18 | -36..-42 | 3 | `0000011` | 2 |
+| -19, -20 | -48, -49 | 1 | `0000001` | 1 |
+
+So the byte is the panel's 7-dot column as a bitmask, bit n for dot n+1: the solid run
+of low bits is the level bar and a lone higher bit is the peak-hold dot (23, 39, 47 from
+the earlier runs are bars of 3 or 4 with the peak dot at 5 or 6). `decodeDots` in
+`properties.js` returns `{ bar, peak }`. Dot thresholds against pair B, from where each
+dot went out, are roughly -18 (dot 5), -24 (4), -33 (3), -45 (2), below -50 (1); the
+thresholds for dots 6 and 7 were not reached.
+
+The same sweep pins pair B's unit: a 36 dB gain change moved it exactly 36 dB, so it is
+dB one-for-one with gain.
+
+What is **not** confirmed: what distinguishes the three dB pairs (pair B sits ~12-14 dB
+above pair A on music and on idle noise alike, a crest factor; pair C sits 1-3 dB under
+pair B at every gain), and the dB reference. Whether the figures are dBFS is untested; a
+tone at a known level into the channel would settle it.
 
 ### Digital gain (`0x0102`)
 

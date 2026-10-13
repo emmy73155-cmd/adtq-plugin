@@ -4,13 +4,14 @@
 
 import { EventEmitter } from 'node:events';
 import { AcnSession } from '../acn/session.js';
-import { DMP } from '../acn/pdu.js';
-import { SLP_PORT, slpDiscover } from '../acn/slp.js';
+import { DMP, DMP_FAIL_REASON } from '../acn/pdu.js';
+import { SLP_PORT, describeUacn, slpDiscover } from '../acn/slp.js';
 import {
   CHANNEL_COUNT,
   CHANNEL_NAME_MAX,
   CHANNEL_PROPS,
   DEVICE_PROPS,
+  METER_PROPS,
   OBJ,
   audioModeIndex,
   audioModeLabel,
@@ -34,15 +35,25 @@ const noop = () => {};
  * Finds the ADTQ at `host`: its control port and — mandatory — its CID.
  * Returns `{ port, cid, cidText, fctn, uacn }`.
  *
- * The request goes to the SLP multicast group as well as straight to the
- * unit: a real ADTQ answers the multicast request and ignores the unicast
- * one, so asking only the unit itself hears nothing (`multicast: false` is
- * for a fake on loopback). The reply is picked out by the unit's address.
+ * The request goes to the SLP multicast group as well as to `host`: the real
+ * unit only answers the group request (a unicast one is dropped), while a
+ * fake on loopback only hears the unicast one. Resolves as soon as `host`
+ * has answered; the rest of the segment's replies are ignored.
  */
-export async function discoverAdtq(host, { slpPort = SLP_PORT, multicast = true, attempts = 2, timeoutMs = 3000, log = noop } = {}) {
+export async function discoverAdtq(
+  host,
+  { slpPort = SLP_PORT, multicast = true, attempts = 2, timeoutMs = 3000, log = noop } = {}
+) {
   let last = null;
   for (let i = 0; i < attempts; i += 1) {
-    const replies = await slpDiscover({ targets: [host], multicast, port: slpPort, timeoutMs, log });
+    const replies = await slpDiscover({
+      targets: [host],
+      multicast,
+      port: slpPort,
+      timeoutMs,
+      stopWhenTargetsAnswer: true,
+      log,
+    });
     const reply = replies.find((r) => r.from === host || r.ip === host);
     if (reply) {
       last = reply;
@@ -51,8 +62,9 @@ export async function discoverAdtq(host, { slpPort = SLP_PORT, multicast = true,
   }
   if (!last) {
     throw new Error(
-      `No ACN device answered at ${host}. Check that the ADTQ is powered, on this network, and ` +
-        `that UDP/${slpPort} is not blocked between this machine and the device.`
+      `No ACN device answered at ${host}. Check that the ADTQ is powered, that this machine is on ` +
+        `the unit's network segment (the lookup is an SLP multicast the unit will not answer by unicast), ` +
+        `and that UDP/${slpPort} is not blocked between this machine and the device.`
     );
   }
   if (!last.cid) {
@@ -101,7 +113,9 @@ export class AdtqDevice extends EventEmitter {
       cid: found.cid,
       cidText: found.cidText,
       model: found.fctn,
+      // what the unit advertises, whole; `label` and `band` are what it means
       name: found.uacn,
+      ...describeUacn(found.uacn),
     };
     this.log('info', `${this.host}: ${found.fctn ?? '?'} "${found.uacn ?? '?'}" port ${found.port} cid ${found.cidText}`);
     const session = new AcnSession({
@@ -176,6 +190,33 @@ export class AdtqDevice extends EventEmitter {
     return { channels: out, unanswered: unanswered.length, asked: addrs.length };
   }
 
+  /**
+   * The audio meters of the given channels, one quick pass with no retry: a
+   * meter reading that arrives late is worse than a tick skipped. Returns
+   * `{ channels: { n: { afDb, afRDb, afDots, afRDots } }, unanswered, asked }`;
+   * a null field means no answer this tick. The dots are `{ bar, peak }`.
+   */
+  async readMeters(channels = [1, 2, 3, 4], { timeoutMs = 400 } = {}) {
+    const session = this.requireSession();
+    const addrs = [];
+    const plan = new Map();
+    for (const ch of channels) {
+      for (const prop of METER_PROPS) {
+        const addr = chanAddr(ch, prop.obj);
+        addrs.push(addr);
+        plan.set(addr, { ch, prop });
+      }
+    }
+    const { replies, unanswered } = await session.getMany(addrs, { concurrency: 8, retries: 0, timeoutMs });
+    const out = {};
+    for (const ch of channels) out[ch] = Object.fromEntries(METER_PROPS.map((p) => [p.key, null]));
+    for (const [addr, reply] of replies) {
+      const { ch, prop } = plan.get(addr);
+      if (reply.vector === DMP.GET_REPLY) out[ch][prop.key] = prop.decode(reply.value);
+    }
+    return { channels: out, unanswered: unanswered.length, asked: addrs.length };
+  }
+
   /** Device-wide properties: `{ encryption }`. */
   async readDevice() {
     const session = this.requireSession();
@@ -196,12 +237,14 @@ export class AdtqDevice extends EventEmitter {
   // -- writes ---------------------------------------------------------------------------
   // Every setter writes, reads back, and reports what the device now holds.
   // `ok` is false when the device did not take the value; `value` is the
-  // decoded read-back (null when nothing came back at all).
+  // decoded read-back (null when nothing came back at all). When the device
+  // answered the SET with a SET_FAIL, `refused` names the reason (for
+  // example 'NOT_WRITABLE'); it is absent otherwise.
 
   async setMute(channel, muted) {
     const session = this.requireSession();
     const r = await session.set(chanAddr(channel, OBJ.RF_MUTE), encodeU8(muted ? 1 : 0));
-    return { ok: r.ok, value: r.after && r.after.length === 1 ? r.after[0] === 1 : null };
+    return writeResult(r, r.after && r.after.length === 1 ? r.after[0] === 1 : null);
   }
 
   /** Frequency in MHz, quantised to the 25 kHz raster and clamped to UHF. */
@@ -210,9 +253,8 @@ export class AdtqDevice extends EventEmitter {
     const khz = clampKhz(quantizeKhz(mhzToKhz(mhz)));
     const r = await session.set(chanAddr(channel, OBJ.FREQ_KHZ), encodeU32(khz));
     return {
-      ok: r.ok,
+      ...writeResult(r, r.after && r.after.length === 4 ? khzToMhz(r.after.readUInt32BE(0)) : null),
       requestedMhz: khzToMhz(khz),
-      value: r.after && r.after.length === 4 ? khzToMhz(r.after.readUInt32BE(0)) : null,
     };
   }
 
@@ -221,7 +263,7 @@ export class AdtqDevice extends EventEmitter {
     const idx = typeof mode === 'number' ? mode : txPowerIndex(mode);
     if (idx === null || idx === undefined) throw new RangeError(`unknown TX power mode ${mode}`);
     const r = await session.set(chanAddr(channel, OBJ.TX_POWER), encodeU8(idx));
-    return { ok: r.ok, value: r.after && r.after.length === 1 ? txPowerLabel(r.after[0]) : null };
+    return writeResult(r, r.after && r.after.length === 1 ? txPowerLabel(r.after[0]) : null);
   }
 
   async setAudioMode(channel, mode) {
@@ -229,15 +271,27 @@ export class AdtqDevice extends EventEmitter {
     const idx = typeof mode === 'number' ? mode : audioModeIndex(mode);
     if (idx === null || idx === undefined) throw new RangeError(`unknown audio mode ${mode}`);
     const r = await session.set(chanAddr(channel, OBJ.AUDIO_MODE), encodeU8(idx));
-    return { ok: r.ok, value: r.after && r.after.length === 1 ? audioModeLabel(r.after[0]) : null };
+    return writeResult(r, r.after && r.after.length === 1 ? audioModeLabel(r.after[0]) : null);
   }
 
+  /**
+   * The name is read from 0x08fb but written through 0x0001: the unit answers a
+   * SET on 0x08fb with SET_FAIL NOT_WRITABLE, and a SET on 0x0001 shows up on
+   * both addresses at once (ADTQ G57 NACLOCK, 2026-09-08).
+   */
   async setChannelName(channel, name) {
     const session = this.requireSession();
     const clean = String(name).replace(/[^\x20-\x7e]/g, '').slice(0, CHANNEL_NAME_MAX);
-    const r = await session.set(chanAddr(channel, OBJ.CHAN_NAME), encodeString(clean));
-    return { ok: r.ok, value: r.after ? decodeString(r.after) : null };
+    const r = await session.set(chanAddr(channel, OBJ.CHAN_NAME_ALT), encodeString(clean));
+    return writeResult(r, r.after ? decodeString(r.after) : null);
   }
+}
+
+/** `{ ok, value }`, plus `refused` naming the SET_FAIL reason when the device sent one. */
+function writeResult(r, value) {
+  const out = { ok: r.ok, value };
+  if (r.refused !== null && r.refused !== undefined) out.refused = DMP_FAIL_REASON[r.refused] ?? `code ${r.refused}`;
+  return out;
 }
 
 export { CHANNEL_COUNT };
