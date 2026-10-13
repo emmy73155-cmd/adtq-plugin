@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "shure-adtq",
   "name": "Shure ADTQ",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "BUSL-1.1",
   "repository": "https://github.com/soundbase-lab/shure-adtq",
   "maintainers": [{ "name": "Matt Dale", "email": "matt.dale@soundbase.app" }],
